@@ -1,0 +1,6 @@
+name: astrbot_plugin_gemini_mode
+display_name: Gemini 格式底层模式切换
+description: 在小窝或 QQ 通过 /gemini 切换 Gemini 原生真流式与传统非流式
+version: 1.0.0
+author: Felis Abyssalis
+repo: "https://github.com/EmilyCheoh/astrbot_plugin_gemini_mode"
