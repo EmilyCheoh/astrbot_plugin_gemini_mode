@@ -63,6 +63,7 @@ class GeminiMode(Star):
             "非流": "legacy",
             "状态": "status",
             "check": "status",
+            "mode": "status",
         }.get(mode, mode)
 
         cls = self._gemini_class()
