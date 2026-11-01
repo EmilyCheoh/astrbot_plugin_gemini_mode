@@ -1,0 +1,16 @@
+{
+  "mode": {
+    "description": "Gemini 底层请求模式",
+    "type": "string",
+    "options": [
+      "stream",
+      "legacy"
+    ],
+    "labels": [
+      "流式",
+      "非流"
+    ],
+    "default": "stream",
+    "hint": "仅切换 Gemini 原生 API 的底层请求方式，不影响 AstrBot 的流式显示开关。可在小窝或 QQ 用 /gemini 指令切换。"
+  }
+}

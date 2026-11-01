@@ -1,8 +1,8 @@
-"""Switch the Gemini native transport at runtime, without touching AstrBot's streaming UI."""
-from asyncio import base_events
+"""Runtime switch for Gemini's native API transport, shared by Den and QQ."""
+
 from pathlib import Path
 
-from astrbot.api import logger
+from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star
 from astrbot.core.provider.register import provider_cls_map
@@ -10,21 +10,24 @@ from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 
 class GeminiMode(Star):
-    """Use /gmode stream, /gmode legacy or /gmode status in Den or QQ."""
-
-    def __init__(self, context: Context):
+    def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
-        self._mode_file = (
-            Path(get_astrbot_data_path())
-            / "plugin_data"
-            / "astrbot_plugin_gemini_mode"
-            / "mode.txt"
-        )
-        self._mode = "stream"
-        if self._mode_file.is_file():
-            stored = self._mode_file.read_text(encoding="utf-8").strip()
-            if stored in ("stream", "legacy"):
-                self._mode = stored
+        self.config = config
+        # First upgrade from mode.txt: migrate the old selection once, then retire the file.
+        if getattr(config, "first_deploy", False):
+            old_file = (
+                Path(get_astrbot_data_path())
+                / "plugin_data" / "astrbot_plugin_gemini_mode" / "mode.txt"
+            )
+            if old_file.is_file():
+                try:
+                    old_mode = old_file.read_text(encoding="utf-8").strip()
+                    if old_mode in ("stream", "legacy"):
+                        self.config["mode"] = old_mode
+                        self.config.save_config()
+                    old_file.unlink()
+                except OSError as exc:
+                    logger.warning("[gemini-mode] 迁移旧模式记录失败：%s", exc)
         self._apply()
 
     @staticmethod
@@ -38,15 +41,16 @@ class GeminiMode(Star):
     def _apply(self) -> bool:
         cls = self._gemini_class()
         if cls is None:
-            logger.warning("[gmode] Gemini 原生适配器或可切换开关不存在")
+            logger.warning("[gemini-mode] Gemini 原生适配器或运行时开关不存在")
             return False
-        cls.USE_STREAMED_NONSTREAM_REQUESTS = self._mode == "stream"
-        logger.info("[gmode] Gemini 底层模式: %s", self._mode)
+        mode = self.config.get("mode", "stream")
+        cls.USE_STREAMED_NONSTREAM_REQUESTS = mode == "stream"
+        logger.info("[gemini-mode] Gemini 底层模式：%s", mode)
         return True
 
     @filter.on_astrbot_loaded()
     async def on_loaded(self):
-        # Also apply after all providers have been registered on a cold start.
+        # Provider 在冷启动过程中可能晚于插件注册。
         self._apply()
 
     @filter.command("gemini")
@@ -58,32 +62,38 @@ class GeminiMode(Star):
             "流": "stream",
             "非流": "legacy",
             "状态": "status",
+            "check": "status",
         }.get(mode, mode)
+
         cls = self._gemini_class()
         if cls is None:
             yield event.plain_result("⚠️ 当前 Gemini 代码缺少运行时切换开关，模式未改变。")
             return
 
         if mode in ("", "status"):
-            actual = "stream" if cls.USE_STREAMED_NONSTREAM_REQUESTS else "legacy"
+            actual = "流式（stream）" if cls.USE_STREAMED_NONSTREAM_REQUESTS else "非流（legacy）"
             yield event.plain_result(f"🐈‍⬛ Gemini 底层模式：{actual}（小窝与 QQ 共用）")
             return
 
         if mode not in ("stream", "legacy"):
-            yield event.plain_result("用法：/gemini 流式（流） | /gemini 非流 | /gemini status（状态）")
+            yield event.plain_result(
+                "用法：/gemini 流式（流） | /gemini 非流 | /gemini status（状态/check）"
+            )
             return
 
-        # Switch the class attribute used by the *existing* provider instances.
-        cls.USE_STREAMED_NONSTREAM_REQUESTS = mode == "stream"
-        self._mode = mode
+        # 先保存原生插件配置，再更新正在运行的 Provider 类开关。
+        previous = self.config.get("mode", "stream")
+        self.config["mode"] = mode
         try:
-            self._mode_file.parent.mkdir(parents=True, exist_ok=True)
-            self._mode_file.write_text(mode + "\n", encoding="utf-8")
+            self.config.save_config()
         except OSError as exc:
-            logger.error("[gmode] 切换已生效，但保存失败：%s", exc)
-            yield event.plain_result(f"✅ 已切换到 {mode}，但重启后可能恢复默认模式。")
+            self.config["mode"] = previous
+            logger.error("[gemini-mode] 保存模式失败：%s", exc)
+            yield event.plain_result("⚠️ 保存模式失败，本次没有切换。")
             return
 
+        cls.USE_STREAMED_NONSTREAM_REQUESTS = mode == "stream"
+        display = "流式" if mode == "stream" else "非流"
         yield event.plain_result(
-            f"✅ Gemini 已切换到 {mode}，下一次请求生效；无需重启 AstrBot。"
+            f"✅ Gemini 已切换到{display}，下一次请求生效；无需重启 AstrBot。"
         )
