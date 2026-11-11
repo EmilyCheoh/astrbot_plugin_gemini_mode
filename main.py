@@ -1,5 +1,6 @@
 """Runtime switch for Gemini's native API transport, shared by Den and QQ."""
 
+from copy import copy
 from pathlib import Path
 
 from astrbot.api import AstrBotConfig, logger
@@ -38,11 +39,40 @@ class GeminiMode(Star):
             return cls
         return None
 
+    @staticmethod
+    def _install_stream_bridge(cls):
+        """Let legacy mode use Gemini's non-streaming API even in AstrBot's streaming runner."""
+        if hasattr(cls, "_gemini_mode_original_query_stream"):
+            return
+
+        cls._gemini_mode_original_query_stream = cls._query_stream
+
+        async def _query_stream_with_mode(provider, payloads, tools):
+            if provider.USE_STREAMED_NONSTREAM_REQUESTS:
+                async for response in provider._gemini_mode_original_query_stream(payloads, tools):
+                    yield response
+                return
+
+            # AstrBot may call text_chat_stream() even when this plugin requests legacy.
+            # Make exactly one real non-streaming Gemini request, then adapt its full
+            # answer to the runner's chunk + final-response protocol.
+            response = await provider._query_legacy(payloads, tools)
+            if response.role == "assistant" and (
+                response.reasoning_content or response.result_chain or response.completion_text
+            ):
+                chunk = copy(response)
+                chunk.is_chunk = True
+                yield chunk
+            yield response
+
+        cls._query_stream = _query_stream_with_mode
+
     def _apply(self) -> bool:
         cls = self._gemini_class()
         if cls is None:
             logger.warning("[gemini-mode] Gemini 原生适配器或运行时开关不存在")
             return False
+        self._install_stream_bridge(cls)
         mode = self.config.get("mode", "stream")
         cls.USE_STREAMED_NONSTREAM_REQUESTS = mode == "stream"
         logger.info("[gemini-mode] Gemini 底层模式：%s", mode)
@@ -98,3 +128,11 @@ class GeminiMode(Star):
         yield event.plain_result(
             f"✅ Gemini 已切换到{display}，下一次请求生效；无需重启 AstrBot。"
         )
+
+    async def terminate(self):
+        # A disabled/reloaded plugin should not leave its streaming bridge installed.
+        cls = self._gemini_class()
+        if cls is not None and hasattr(cls, "_gemini_mode_original_query_stream"):
+            cls._query_stream = cls._gemini_mode_original_query_stream
+            del cls._gemini_mode_original_query_stream
+            cls.USE_STREAMED_NONSTREAM_REQUESTS = True
